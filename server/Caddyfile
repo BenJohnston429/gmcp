@@ -1,0 +1,24 @@
+{
+	email {$LETSENCRYPT_EMAIL}
+}
+
+{$SUBDOMAIN} {
+	# gMCP's own MCP endpoint — reachable by any remote-MCP-capable client, not
+	# just LibreChat. Bearer-token gated by gmcp itself; Caddy just routes to it.
+	handle /mcp* {
+		reverse_proxy gmcp:8080
+	}
+
+	# Google's OAuth consent redirect comes back here, which is what lets a service
+	# be connected without running anything locally. /oauth/start is bearer-gated by
+	# gmcp; /oauth/callback can't be (it's a browser redirect) and is gated on a
+	# single-use state instead.
+	handle /oauth/* {
+		reverse_proxy gmcp:8080
+	}
+
+	# Everything else goes to LibreChat's own web UI.
+	handle {
+		reverse_proxy api:3080
+	}
+}

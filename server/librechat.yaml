@@ -1,0 +1,49 @@
+version: 1.2.1
+cache: true
+
+# gMCP runs on the internal Docker network (http://gmcp:8080) — a private
+# address, so LibreChat's default SSRF protection blocks it unless explicitly
+# allow-listed here. Without this, the mcpServers entry below silently fails.
+mcpSettings:
+  allowedAddresses:
+    - 'gmcp:8080'
+
+mcpServers:
+  gmcp:
+    type: streamable-http
+    url: http://gmcp:8080/mcp
+    # A raw `headers.Authorization` entry here (instead of this structured apiKey
+    # field) makes LibreChat's own OAuth-detection probe fire an unauthenticated
+    # request at startup; since gmcp correctly 401s that, LibreChat concludes
+    # "requiresOAuth" and defers connecting until a per-user OAuth flow that gmcp
+    # doesn't have — so it never lists capabilities/tools. The apiKey field with
+    # authorization_type: bearer sets requiresOAuth=false directly, so LibreChat
+    # connects (and lists tools) eagerly at startup instead.
+    apiKey:
+      source: admin
+      key: '${GMCP_HTTP_TOKEN}'
+      authorization_type: bearer
+    timeout: 60000
+
+endpoints:
+  custom:
+    - name: 'OpenRouter'
+      apiKey: '${OPENROUTER_KEY}'
+      baseURL: 'https://openrouter.ai/api/v1'
+      models:
+        default: ['anthropic/claude-sonnet-4.5']
+        fetch: true
+      titleConvo: true
+      titleModel: 'anthropic/claude-sonnet-4.5'
+      dropParams: ['stop']
+      modelDisplayLabel: 'OpenRouter'
+      # CLAUDE.md-required privacy settings, baked into every request rather
+      # than trusted to be set by hand: Zero Data Retention plus denying
+      # provider-side data collection/training use. The one piece this can't
+      # cover — OpenRouter's account-wide training opt-out — is a one-time
+      # manual step on the operator's own openrouter.ai dashboard; see
+      # .env.example's OPENROUTER_KEY comment.
+      addParams:
+        zdr: true
+        provider:
+          data_collection: 'deny'
