@@ -1,0 +1,153 @@
+# LibreChat's own services (api, admin-panel, mongodb, meilisearch, vectordb,
+# rag_api) are used as published by LibreChat upstream. See
+# https://github.com/danny-avila/LibreChat/blob/main/docker-compose.yml
+# with two additions: the librechat.yaml config mount (their own documented
+# customization point) and dropping api's/admin-panel's direct host port
+# bindings, since Caddy fronts both now instead of exposing them directly.
+# gmcp and caddy are new services added for this stack.
+
+services:
+  api:
+    container_name: LibreChat
+    depends_on:
+      - mongodb
+      - rag_api
+    image: registry.librechat.ai/danny-avila/librechat-dev:latest
+    restart: always
+    user: "${UID}:${GID}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - HOST=0.0.0.0
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      - MEILI_HOST=http://meilisearch:7700
+      - LIBRECHAT_TEMP_CREDENTIALS_PATH=/app/data/.env.temp
+      - RAG_PORT=${RAG_PORT:-8000}
+      - RAG_API_URL=http://rag_api:${RAG_PORT:-8000}
+    volumes:
+      - type: bind
+        source: ./.env
+        target: /app/.env
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+      - ./images:/app/client/public/images
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - librechat-data:/app/data
+  admin-panel:
+    container_name: admin-panel
+    image: registry.librechat.ai/clickhouse/librechat-admin-panel:latest
+    depends_on:
+      - api
+    restart: always
+    environment:
+      - PORT=3000
+      - SESSION_SECRET=${ADMIN_PANEL_SESSION_SECRET}
+      - API_SERVER_URL=http://api:${PORT:-3080}
+      - VITE_API_BASE_URL=${DOMAIN_CLIENT}
+      - SESSION_COOKIE_SECURE=true
+  mongodb:
+    container_name: chat-mongodb
+    image: mongo:8.0.20
+    restart: always
+    user: "${UID}:${GID}"
+    volumes:
+      - ./data-node:/data/db
+    command: mongod --noauth
+  meilisearch:
+    container_name: chat-meilisearch
+    image: getmeili/meilisearch:v1.35.1
+    restart: always
+    user: "${UID}:${GID}"
+    environment:
+      - MEILI_HOST=http://meilisearch:7700
+      - MEILI_NO_ANALYTICS=true
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+    volumes:
+      - ./meili_data_v1.35.1:/meili_data
+  vectordb:
+    container_name: vectordb
+    image: pgvector/pgvector:0.8.0-pg15-trixie
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+    restart: always
+    volumes:
+      - pgdata2:/var/lib/postgresql/data
+  rag_api:
+    container_name: rag_api
+    image: registry.librechat.ai/danny-avila/librechat-rag-api-dev-lite:latest
+    environment:
+      - DB_HOST=vectordb
+      - RAG_PORT=${RAG_PORT:-8000}
+    restart: always
+    depends_on:
+      - vectordb
+    env_file:
+      - .env
+
+  # gMCP itself. Only reachable inside the Docker network (by LibreChat, per
+  # librechat.yaml, and by Caddy), never directly on a host port. Pulls a
+  # pre-built image rather than building from source, since this installer
+  # ships without the source tree.
+  gmcp:
+    container_name: gmcp
+    image: ghcr.io/benjohnston429/gmcp:latest
+    restart: always
+    # The image's own unprivileged user (10001) by default. install.sh overrides this
+    # with the deploying user's uid when the install isn't running as root, so the
+    # bind-mounted token store below is writable without chown'ing it to another uid,
+    # which would need root, and the point of that path is not needing root at all.
+    user: "${GMCP_UID:-10001}:${GMCP_GID:-10001}"
+    env_file:
+      - .env
+    environment:
+      # rmcp's DNS-rebinding Host check only allows localhost/127.0.0.1/::1 by
+      # default. Additive-only allowlist, so both the internal Docker DNS name
+      # (LibreChat's route to gmcp) and the public subdomain (Caddy's /mcp*
+      # route, for external MCP clients) need to be named explicitly here.
+      - GMCP_ALLOWED_HOSTS=gmcp:8080,${SUBDOMAIN}
+      # gMCP's OAuth client lives in .env under GMCP_-prefixed names so LibreChat,
+      # which shares that file, doesn't pick it up as its own Google login provider
+      # (see .env.example). The gmcp binary reads the plain names, same as a local
+      # install, so map them back here, inside this container only.
+      - GOOGLE_CLIENT_ID=${GMCP_GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GMCP_GOOGLE_CLIENT_SECRET}
+      # Lets gmcp host its own OAuth consent redirect, so connecting a Google service
+      # needs nothing installed locally. Must match the redirect URI registered on the
+      # Google OAuth client exactly.
+      - GMCP_PUBLIC_URL=https://${SUBDOMAIN}
+    volumes:
+      # Bind mount, not a named volume, so the token store is inspectable and
+      # backup-able from the host. Owned by UID 10001 to match the container's
+      # non-root user; install.sh chowns it.
+      - ./gmcp-data:/home/gmcp/.gmcp
+
+  # Reverse proxy + automatic Let's Encrypt TLS for SUBDOMAIN. Routes /mcp* to
+  # gmcp (making it separately reachable by any remote-MCP client, not just
+  # LibreChat) and everything else to LibreChat's own UI.
+  caddy:
+    container_name: caddy
+    image: caddy:2-alpine
+    restart: always
+    depends_on:
+      - api
+      - gmcp
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SUBDOMAIN=${SUBDOMAIN}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  pgdata2:
+  librechat-data:
+  caddy-data:
+  caddy-config:
