@@ -1,0 +1,7 @@
+server/.env
+server/gmcp-data/
+server/data-node/
+server/meili_data_v1.35.1/
+server/logs/
+server/images/
+server/uploads/
